@@ -27,6 +27,10 @@ TERMINAL="$STATE_DIR/terminal"
 # Fase del turno en la terminal: inicio | hablando | fin (lo escribe el hook aviso-voz.sh).
 TURNO="$STATE_DIR/terminal-turno"
 TERM_RESP="$STATE_DIR/terminal-respuesta"
+# Confirmación por voz pedida por el hook confirma-voz.sh (los hooks no tienen acceso al micrófono):
+# el hook deja la pregunta en PREGUNTA y espera la respuesta en RESPUESTA_CONF.
+PREGUNTA="$STATE_DIR/confirmacion-pregunta"
+RESPUESTA_CONF="$STATE_DIR/confirmacion-respuesta"
 SEMAFORO="$HOME/.local/bin/semaforo"
 VOZ="Mónica"
 # Segundos seguidos sin oír nada antes de despedirse solo.
@@ -61,6 +65,24 @@ PAUSA_RE='^(pausa|en pausa|pausa la conversacion|silencio|espera un momento|un m
 SIGUE_RE='^(sigue|continua|seguimos|ya estoy|vuelve|fin de la pausa|quita la pausa)( claude)?$'
 turno() { [[ -s "$TURNO" ]] && print -r -- "$(<"$TURNO")"; }
 resp_terminal() { [[ -f "$TERM_RESP" ]] && cat "$TERM_RESP"; }
+
+# Si el hook ha dejado una pregunta, la hace en voz alta, escucha y deja la respuesta.
+atender_confirmacion() {
+  [[ -s "$PREGUNTA" ]] || return 1
+  local pregunta="$(<"$PREGUNTA")" r="" intento
+  rm -f "$PREGUNTA" "$RESPUESTA_CONF"
+  for intento in 1 2; do
+    estado hablando
+    if (( intento == 1 )); then habla "$pregunta"; else habla "No te he oído. ¿Confirmo o cancelo?"; fi
+    estado escuchando
+    r="$("$DICTAR" --debug --pausa 1.5 --max 12 --tono "$TONO_ESCUCHA" 2>>"$DICTAR_LOG")"
+    [[ -n "${r//[[:space:]]/}" ]] && break
+  done
+  estado procesando
+  registro "CONFIRMACIÓN ($pregunta): ${r:-nada oído}"
+  print -r -- "${r:-nada}" > "$RESPUESTA_CONF"
+  return 0
+}
 
 # ¿Hay una terminal compartida viva (ventana abierta y claude corriendo dentro)?
 terminal_activa() {
@@ -99,6 +121,7 @@ esperar_turno() {
   local t=0 sin_say=0
   while true; do
     sleep 1; (( t++ ))
+    atender_confirmacion && continue
     case "$(turno)" in
       fin) break ;;
       hablando)
@@ -148,13 +171,12 @@ silencio_desde=$(date +%s)
 
 while true; do
   estado escuchando
-  tono "$TONO_ESCUCHA"
   print -r -- "--- $(date "+%H:%M:%S") escuchando" >> "$DICTAR_LOG"
   escrito=0
   if terminal_activa; then
     # Escucho en segundo plano para enterarme si el usuario escribe en la terminal mientras tanto.
     salida_dictar="$(mktemp)"
-    "$DICTAR" --debug --pausa 2.0 --max 45 >"$salida_dictar" 2>>"$DICTAR_LOG" &
+    "$DICTAR" --debug --pausa 2.0 --max 45 --tono "$TONO_ESCUCHA" >"$salida_dictar" 2>>"$DICTAR_LOG" &
     dpid=$!
     while kill -0 $dpid 2>/dev/null; do
       sleep 0.3
@@ -164,7 +186,7 @@ while true; do
     (( escrito )) && rc=0
     texto="$(<"$salida_dictar")"; rm -f "$salida_dictar"
   else
-    texto="$("$DICTAR" --debug --pausa 2.0 --max 45 2>>"$DICTAR_LOG")"; rc=$?
+    texto="$("$DICTAR" --debug --pausa 2.0 --max 45 --tono "$TONO_ESCUCHA" 2>>"$DICTAR_LOG")"; rc=$?
   fi
   if (( rc != 0 )); then
     habla "No puedo usar el micrófono. Revisa los permisos y vuelve a lanzarme."
@@ -252,6 +274,7 @@ while true; do
   t=0
   while kill -0 $pid 2>/dev/null; do
     sleep 1; (( t++ ))
+    atender_confirmacion && { estado procesando; continue; }
     if (( t == AVISO_ESPERA )); then
       habla "Estoy en ello."
     elif (( t > AVISO_ESPERA && t % 12 == 0 )); then

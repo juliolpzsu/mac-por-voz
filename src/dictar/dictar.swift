@@ -1,6 +1,6 @@
 // dictar: escucha el micrófono y escribe en stdout lo dictado, hasta detectar una pausa.
 //
-//   dictar [--pausa SEG] [--max SEG] [--idioma es-ES]
+//   dictar [--pausa SEG] [--max SEG] [--idioma es-ES] [--tono sonido.aiff] [--debug]
 //
 // Sale con 0 y el texto (vacío si no se oyó nada antes de --max segundos).
 // Sale con 1 y un mensaje en stderr si faltan permisos o falla el reconocimiento.
@@ -14,6 +14,7 @@ var maxSeg = 20.0      // segundos máximos esperando a que empiece a hablar
 var idioma = "es-ES"
 var umbral: Float = 0.012   // nivel RMS por encima del cual se considera que hay voz
 var debug = false
+var tono = ""         // sonido que se reproduce cuando el micrófono YA está abierto (--tono archivo.aiff)
 func traza(_ m: String) { if debug { FileHandle.standardError.write(("[dictar] " + m + "\n").data(using: .utf8)!) } }
 
 var argumentos = Array(CommandLine.arguments.dropFirst())
@@ -24,6 +25,7 @@ while !argumentos.isEmpty {
     case "--max": maxSeg = Double(argumentos.removeFirst()) ?? maxSeg
     case "--idioma": idioma = argumentos.removeFirst()
     case "--debug": debug = true
+    case "--tono": tono = argumentos.removeFirst()
     case "--umbral": umbral = Float(argumentos.removeFirst()) ?? umbral
     default:
         FileHandle.standardError.write("argumento desconocido: \(a)\n".data(using: .utf8)!)
@@ -55,11 +57,15 @@ guard let reconocedor = SFSpeechRecognizer(locale: Locale(identifier: idioma)), 
     fallo("Reconocimiento de voz no disponible para \(idioma).")
 }
 
-let peticion = SFSpeechAudioBufferRecognitionRequest()
-peticion.shouldReportPartialResults = true
-peticion.addsPunctuation = true
 traza("reconocedor disponible=\(reconocedor.isAvailable) enDispositivo=\(reconocedor.supportsOnDeviceRecognition)")
-if reconocedor.supportsOnDeviceRecognition { peticion.requiresOnDeviceRecognition = true }
+func nuevaPeticion() -> SFSpeechAudioBufferRecognitionRequest {
+    let p = SFSpeechAudioBufferRecognitionRequest()
+    p.shouldReportPartialResults = true
+    p.addsPunctuation = true
+    if reconocedor.supportsOnDeviceRecognition { p.requiresOnDeviceRecognition = true }
+    return p
+}
+var peticion = nuevaPeticion()
 
 var texto = ""
 var ultimoSonido = Date()
@@ -80,12 +86,20 @@ entrada.installTap(onBus: 0, bufferSize: 2048, format: formato) { buffer, _ in
 }
 motor.prepare()
 do { try motor.start() } catch { fallo("No se pudo abrir el micrófono: \(error.localizedDescription)") }
+// Aviso sonoro justo cuando ya se está grabando: si el tono sonara antes, lo dicho durante el arranque se perdería.
+if !tono.isEmpty {
+    let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/afplay"); p.arguments = [tono]
+    try? p.run()
+}
 
 var ultimoCambio = Date()
 let inicio = Date()
 var terminado = false
 
-let tarea = reconocedor.recognitionTask(with: peticion) { resultado, error in
+var reinicios = 0
+var tarea: SFSpeechRecognitionTask! = nil
+func arrancarReconocimiento() {
+  tarea = reconocedor.recognitionTask(with: peticion) { resultado, error in
     if let r = resultado {
         let nuevo = r.bestTranscription.formattedString
         // El reconocedor en dispositivo a veces entrega, tras endAudio(), un resultado final VACÍO que
@@ -100,9 +114,25 @@ let tarea = reconocedor.recognitionTask(with: peticion) { resultado, error in
         // nosotros la tarea: en ambos casos se devuelve lo transcrito hasta ahora (quizá nada) y el que
         // llama decide si vuelve a escuchar. Los permisos ya se comprobaron antes de llegar aquí.
         traza("error reconocimiento: \(e.localizedDescription)")
+        // "No speech detected" llega a los ~5 s sin palabras y mata la sesión. Si aún no hay texto y queda tiempo
+        // de escucha, se abre otra sesión de reconocimiento en vez de rendirse (el usuario puede tardar en hablar).
+        let ns = e as NSError
+        let sinVoz = ns.code == 1110 || e.localizedDescription.contains("No speech")
+        let transcurrido = Date().timeIntervalSince(inicio)
+        traza("dominio=\(ns.domain) codigo=\(ns.code) sinVoz=\(sinVoz) texto=\(texto.isEmpty ? "vacío" : "hay") t=\(Int(transcurrido)) max=\(Int(maxSeg)) reinicios=\(reinicios)")
+        if sinVoz && texto.isEmpty && reinicios < 12 && transcurrido < maxSeg {
+            reinicios += 1
+            traza("sin voz, nueva sesión de reconocimiento (\(reinicios))")
+            peticion = nuevaPeticion()
+            terminado = false
+            arrancarReconocimiento()
+            return
+        }
         terminado = true
     }
+  }
 }
+arrancarReconocimiento()
 
 esperar {
     if terminado { return true }

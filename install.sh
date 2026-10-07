@@ -6,10 +6,17 @@ cd "$(dirname "$0")"
 mkdir -p ~/.local/bin ~/.local/src ~/.local/state/siri-claude ~/.claude/hooks
 cp bin/* ~/.local/bin/ && chmod +x ~/.local/bin/*
 cp -R src/dictar src/semaforo ~/.local/src/
-SDK="$(xcrun --show-sdk-path 2>/dev/null || ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX*.sdk | tail -1)"
-echo "Compilando dictar y semaforo con $SDK ..."
-swiftc -O -sdk "$SDK" -framework AVFoundation -framework Speech -o ~/.local/bin/dictar src/dictar/dictar.swift
-swiftc -O -sdk "$SDK" -framework AppKit -o ~/.local/bin/semaforo src/semaforo/semaforo.swift
+# El SDK más nuevo no siempre casa con el compilador instalado: se prueba del más nuevo al más viejo.
+ok=""
+for SDK in $(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX*.sdk 2>/dev/null | sort -rV) "$(xcrun --show-sdk-path 2>/dev/null)"; do
+  [[ -d "$SDK" ]] || continue
+  if swiftc -O -sdk "$SDK" -framework AVFoundation -framework Speech -o ~/.local/bin/dictar src/dictar/dictar.swift 2>/dev/null \
+     && swiftc -O -sdk "$SDK" -framework AppKit -o ~/.local/bin/semaforo src/semaforo/semaforo.swift 2>/dev/null; then
+    ok="$SDK"; break
+  fi
+done
+[[ -n "$ok" ]] || { echo "No he podido compilar dictar/semaforo con ningún SDK de /Library/Developer/CommandLineTools/SDKs" >&2; exit 1; }
+echo "dictar y semaforo compilados con $ok"
 cp hooks/*.sh ~/.claude/hooks/ && chmod +x ~/.claude/hooks/*.sh
 if [[ -f ~/.claude/settings.json ]]; then
   jq -s '.[0] * .[1]' ~/.claude/settings.json hooks/settings.hooks.json > ~/.claude/settings.json.new && mv ~/.claude/settings.json.new ~/.claude/settings.json

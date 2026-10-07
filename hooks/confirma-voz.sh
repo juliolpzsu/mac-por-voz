@@ -47,24 +47,39 @@ esac
 tp=$(printf '%s' "$entrada" | jq -r '.transcript_path // empty')
 if [ -f "$tp" ]; then
   ultima=$(jq -rs '[.[] | select(.type=="user") | .message.content | if type=="string" then . else (.[]? | select(.type=="text") | .text) end] | last // empty' "$tp" 2>/dev/null | tr 'A-ZÁÉÍÓÚ' 'a-záéíóú')
-  if printf '%s' "$ultima" | grep -Eq '^[[:space:]]*(s[ií]|vale|ok|claro|confirmo|confirmado|adelante|dale|hazlo|b[oó]rral[oa]s?|env[ií]al[oa]|por supuesto|am[eé]n|venga|de acuerdo|afirmativo)\b'; then
+  if printf '%s' "$ultima" | grep -Eq '^[[:space:]]*(s[ií]|vale|ok|claro|confirm[oa]|confirmad[oa]|conf[ií]rmalo|adelante|dale|hazlo|b[oó]rral[oa]s?|env[ií]al[oa]|por supuesto|am[eé]n|venga|de acuerdo|afirmativo)\b'; then
     exit 0
   fi
 fi
 
-anterior=$(cat "$ESTADO" 2>/dev/null)
+STATE_VOZ="$HOME/.local/state/siri-claude"
 respuesta=""
+# Con el bucle de voz en marcha, es él quien pregunta y escucha (los hooks reciben el micrófono en silencio).
+if [ -s "$STATE_VOZ/conversa.pid" ] && kill -0 "$(cat "$STATE_VOZ/conversa.pid")" 2>/dev/null; then
+  rm -f "$STATE_VOZ/confirmacion-respuesta"
+  printf '%s\n' "Voy a $que. Di confirmo o cancela." > "$STATE_VOZ/confirmacion-pregunta"
+  for i in $(seq 1 40); do
+    sleep 1
+    [ -s "$STATE_VOZ/confirmacion-respuesta" ] && { respuesta=$(tr 'A-ZÁÉÍÓÚ' 'a-záéíóú' < "$STATE_VOZ/confirmacion-respuesta"); break; }
+  done
+  rm -f "$STATE_VOZ/confirmacion-pregunta" "$STATE_VOZ/confirmacion-respuesta"
+  [ "$respuesta" = "nada" ] && respuesta=""
+  if printf '%s' "$respuesta" | grep -Eq '^[[:space:]]*(s[ií]|vale|ok|claro|confirm[oa]|confirmad[oa]|conf[ií]rmalo|adelante|dale|hazlo|por supuesto|venga|de acuerdo|afirmativo)\b'; then exit 0; fi
+  jq -n --arg r "El usuario no lo ha confirmado por voz (dijo: ${respuesta:-nada}). No lo hagas y pregúntale qué quiere." \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
+  exit 0
+fi
+anterior=$(cat "$ESTADO" 2>/dev/null)
 for intento in 1 2; do
   if [ "$intento" = 1 ]; then say -v "$VOZ" -- "Voy a $que. Di confirmo o cancela."
   else say -v "$VOZ" -- "No te he oído. ¿Confirmo o cancelo?"; fi
   echo escuchando > "$ESTADO"
-  afplay /System/Library/Sounds/Tink.aiff 2>/dev/null
-  respuesta=$("$DICTAR" --debug --pausa 1.5 --max 12 2>>"$HOME/.local/state/siri-claude/dictar.log" | tr 'A-ZÁÉÍÓÚ' 'a-záéíóú')
+  respuesta=$("$DICTAR" --debug --pausa 1.5 --max 12 --tono /System/Library/Sounds/Tink.aiff 2>>"$HOME/.local/state/siri-claude/dictar.log" | tr 'A-ZÁÉÍÓÚ' 'a-záéíóú')
   [ -n "$anterior" ] && echo "$anterior" > "$ESTADO"
   [ -n "$respuesta" ] && break
 done
 printf '%s %s\n' "$(date +%H:%M:%S)" "CONFIRMACIÓN ($que): ${respuesta:-nada oído}" >> "$LOG"
-if printf '%s' "$respuesta" | grep -Eq '^[[:space:]]*(s[ií]|vale|ok|claro|confirmo|confirmado|adelante|dale|hazlo|por supuesto|venga|de acuerdo|afirmativo)\b'; then
+if printf '%s' "$respuesta" | grep -Eq '^[[:space:]]*(s[ií]|vale|ok|claro|confirm[oa]|confirmad[oa]|conf[ií]rmalo|adelante|dale|hazlo|por supuesto|venga|de acuerdo|afirmativo)\b'; then
   exit 0
 fi
 say -v "$VOZ" -- "Cancelado."

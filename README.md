@@ -71,7 +71,10 @@ Todo lo que habla con el modelo pasa por `bin/siri-claude`, función `ask()`. Su
 - **Los bucles no van en Atajos**: las acciones Repetir/Si fallan al combinarlas con scripts; el atajo solo lanza `claude-conversa`, que vive en zsh y se desacopla para que Siri no se quede esperando.
 - **Resultado final vacío**: el reconocedor en dispositivo a veces entrega, al cerrar el audio, un resultado final vacío que pisaría la frase. `dictar` lo ignora. Si se pierden frases, `dictar --debug` muestra los parciales.
 - **Habla después del tono**: mientras la IA lee la respuesta el micrófono está cerrado; lo que digas antes del tono se pierde (sin auriculares, escuchar mientras habla haría que se oyera a sí misma).
-- **Palabras cortas**: un "sí" suelto se reconoce mal; por eso la confirmación pide "confirmo".
+- **Palabras cortas**: un "sí" suelto se reconoce mal; por eso la confirmación pide "confirmo" (y acepta variantes como "confirma").
+- **Los hooks no oyen**: Claude Code ejecuta los hooks en un entorno donde el micrófono entrega silencio. Por eso `confirma-voz.sh` no escucha él mismo: deja la pregunta en `confirmacion-pregunta` y es el bucle de voz quien la hace, escucha y escribe `confirmacion-respuesta`.
+- **El tono lo da `dictar`** (`--tono`), justo cuando ya está grabando: si sonara antes de abrir el micrófono, una respuesta corta e inmediata se perdería en el arranque.
+- **SDK de Swift**: el SDK más nuevo de Command Line Tools puede no casar con el compilador; `install.sh` prueba del más nuevo al más viejo.
 - **Terminal compartida**: Terminal.app hereda las variables de entorno del proceso que lo lanza; hay que limpiar `CLAUDE_CODE_CHILD_SESSION` y poner `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` o la transcripción no se guarda. Para enviar el prompt no basta un salto de línea: hace falta pulsar Intro con System Events (permiso de Accesibilidad), que roba el foco un instante.
 - **Una sola conversación a la vez**: `conversa.pid` hace de cerrojo; relanzar el script cierra la conversación abierta.
 - **Permisos (TCC)**: se conceden a la app que lanza el proceso (Atajos o Terminal), no al script.
