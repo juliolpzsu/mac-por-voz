@@ -61,7 +61,7 @@ normaliza() {
 }
 # Órdenes de pausa: el micrófono sigue abierto pero se ignora todo hasta oír la orden de seguir
 # (útil en una llamada, para que no se cuelen frases ajenas).
-PAUSA_RE='^(pausa|en pausa|pausa la conversacion|silencio|espera un momento|un momento)( claude)?$'
+PAUSA_RE='^(pausa|usa|causa|pausa pausa|en pausa|pausa la conversacion|silencio|espera un momento|un momento)( claude)?$'
 SIGUE_RE='^(sigue|continua|seguimos|ya estoy|vuelve|fin de la pausa|quita la pausa)( claude)?$'
 turno() { [[ -s "$TURNO" ]] && print -r -- "$(<"$TURNO")"; }
 resp_terminal() { [[ -f "$TERM_RESP" ]] && cat "$TERM_RESP"; }
