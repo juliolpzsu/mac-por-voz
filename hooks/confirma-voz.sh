@@ -23,8 +23,19 @@ case "$tool" in
       { print }')
     # Patrones de comandos que borran, envían o rompen cosas.
     if printf '%s' "$cmd" | grep -Eq '(^|[;&|[:space:]])(rm|rmdir|trash|shred)[[:space:]]|[[:space:]]delete[[:space:]]|git[[:space:]]+(push|reset[[:space:]]+--hard|clean|checkout[[:space:]]+\.)|(^|[;&|[:space:]])(kill|killall|pkill|sudo|diskutil|mkfs|dd)[[:space:]]|>[[:space:]]*/(etc|usr|System|Library)/|launchctl[[:space:]]+(unload|remove|bootout)'; then
-      corto=$(printf '%s' "$cmd" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g' | cut -c1-140)
-      que="ejecutar este comando: $corto"
+      # Describir la acción en una frase corta en vez de leer el comando entero.
+      plano=$(printf '%s' "$cmd" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
+      app=$(printf '%s' "$plano" | grep -oE 'tell application "[^"]+"' | head -1 | sed -E 's/tell application "([^"]+)"/\1/')
+      case "$app" in Reminders) app="Recordatorios" ;; Notes) app="Notas" ;; Mail) app="Correo" ;; Calendar) app="Calendario" ;; Finder) app="el Finder" ;; esac
+      if [ -n "$app" ]; then que="borrar algo en $app"
+      elif printf '%s' "$plano" | grep -Eq '(^|[;&| ])(rm|rmdir|trash|shred) '; then
+        que="borrar $(printf '%s' "$plano" | grep -oE '(^|[;&| ])(rm|rmdir|trash|shred) [^;&|]*' | head -1 | sed -E 's/^[;&| ]*(rm|rmdir|trash|shred) //; s/ -[a-zA-Z]+//g' | cut -c1-60)"
+      elif printf '%s' "$plano" | grep -Eq 'git +push'; then que="hacer git push"
+      elif printf '%s' "$plano" | grep -Eq 'git +(reset|clean|checkout)'; then que="descartar cambios en git"
+      elif printf '%s' "$plano" | grep -Eq '(^|[;&| ])(kill|killall|pkill) '; then que="cerrar procesos"
+      elif printf '%s' "$plano" | grep -Eq '(^|[;&| ])sudo '; then que="ejecutar un comando como administrador"
+      else que="ejecutar un comando que borra o modifica cosas del sistema"
+      fi
     fi ;;
   mcp__*send_message*|mcp__*__reply|mcp__*__forward) que="enviar un correo" ;;
   mcp__*trash*|mcp__*delete*) que="borrar algo en $(printf '%s' "$tool" | sed -E 's/^mcp__[^_]+_?[^_]*__//; s/_.*//')" ;;
@@ -41,12 +52,17 @@ if [ -f "$tp" ]; then
   fi
 fi
 
-say -v "$VOZ" -- "Voy a $que. Di confirmo o cancela."
 anterior=$(cat "$ESTADO" 2>/dev/null)
-echo escuchando > "$ESTADO"
-afplay /System/Library/Sounds/Tink.aiff 2>/dev/null
-respuesta=$("$DICTAR" --debug --pausa 1.5 --max 12 2>>"$HOME/.local/state/siri-claude/dictar.log" | tr 'A-ZÁÉÍÓÚ' 'a-záéíóú')
-[ -n "$anterior" ] && echo "$anterior" > "$ESTADO"
+respuesta=""
+for intento in 1 2; do
+  if [ "$intento" = 1 ]; then say -v "$VOZ" -- "Voy a $que. Di confirmo o cancela."
+  else say -v "$VOZ" -- "No te he oído. ¿Confirmo o cancelo?"; fi
+  echo escuchando > "$ESTADO"
+  afplay /System/Library/Sounds/Tink.aiff 2>/dev/null
+  respuesta=$("$DICTAR" --debug --pausa 1.5 --max 12 2>>"$HOME/.local/state/siri-claude/dictar.log" | tr 'A-ZÁÉÍÓÚ' 'a-záéíóú')
+  [ -n "$anterior" ] && echo "$anterior" > "$ESTADO"
+  [ -n "$respuesta" ] && break
+done
 printf '%s %s\n' "$(date +%H:%M:%S)" "CONFIRMACIÓN ($que): ${respuesta:-nada oído}" >> "$LOG"
 if printf '%s' "$respuesta" | grep -Eq '^[[:space:]]*(s[ií]|vale|ok|claro|confirmo|confirmado|adelante|dale|hazlo|por supuesto|venga|de acuerdo|afirmativo)\b'; then
   exit 0
