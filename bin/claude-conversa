@@ -1,0 +1,271 @@
+#!/bin/zsh
+# Conversación continua por voz con Claude, manos libres:
+#   tic (micrófono abierto) -> dictar -> pop (te he oído) -> siri-claude -> voz -> vuelve a escuchar
+# hasta que el usuario se despide o lleva un rato sin hablar.
+# Se puede lanzar desde la terminal o desde el atajo "Hablar con Claude".
+#
+# Terminal compartida: si claude-terminal ha abierto una terminal sobre esta misma sesión, lo dictado se
+# escribe en esa terminal (misma conversación, se ve en directo) y las respuestas las lee en voz alta el hook
+# aviso-voz.sh (CLAUDE_VOZ=1). Lo que el usuario teclea allí también se contesta por voz. Al cerrarse la terminal,
+# el bucle vuelve a hablar directamente con siri-claude sobre la misma sesión.
+
+DICTAR="$HOME/.local/bin/dictar"
+PUENTE="$HOME/.local/bin/siri-claude"
+STATE_DIR="$HOME/.local/state/siri-claude"
+LOG_FILE="$STATE_DIR/error.log"
+LOCK="$STATE_DIR/conversa.pid"
+ESTADO="$STATE_DIR/estado"
+SESSION_FILE="$STATE_DIR/session"
+# Registro de la conversación (qué se oyó, qué se respondió) y parciales del reconocedor.
+CONV_LOG="$STATE_DIR/conversa.log"
+DICTAR_LOG="$STATE_DIR/dictar.log"
+# La toca el hook de Claude cada vez que el usuario escribe en una terminal abierta desde esta conversación
+# (claude-terminal exporta CLAUDE_VOZ=1): mientras trabaje por texto, el bucle no se retira por silencio.
+ACTIVIDAD="$STATE_DIR/actividad"
+# Terminal compartida: "id_ventana índice_pestaña" (lo escribe claude-terminal).
+TERMINAL="$STATE_DIR/terminal"
+# Fase del turno en la terminal: inicio | hablando | fin (lo escribe el hook aviso-voz.sh).
+TURNO="$STATE_DIR/terminal-turno"
+TERM_RESP="$STATE_DIR/terminal-respuesta"
+SEMAFORO="$HOME/.local/bin/semaforo"
+VOZ="Mónica"
+# Segundos seguidos sin oír nada antes de despedirse solo.
+SILENCIO_MAX=180
+# Segundos de espera tras los que aviso de que sigo trabajando.
+AVISO_ESPERA=8
+# Repetir en voz alta lo entendido antes de responder (1 = sí). Útil si dudas de la transcripción.
+ECO=${ECO:-0}
+# Señales: micrófono abierto, frase captada, sigo trabajando.
+TONO_ESCUCHA=/System/Library/Sounds/Tink.aiff
+TONO_OIDO=/System/Library/Sounds/Pop.aiff
+TONO_ESPERA=/System/Library/Sounds/Purr.aiff
+
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+mkdir -p "$STATE_DIR"
+
+habla() { say -v "$VOZ" -- "$1" 2>>"$LOG_FILE"; }
+tono()  { afplay "$1" 2>/dev/null; }
+# Estado para el semáforo: escuchando | procesando | hablando
+estado() { print -r -- "$1" > "$ESTADO"; }
+registro() { print -r -- "$(date "+%H:%M:%S") $1" >> "$CONV_LOG"; }
+# Texto en minúsculas, sin acentos ni signos, para comparar órdenes cortas.
+normaliza() {
+  local n="${(L)1}"
+  n="${n//[.,;:!?¡¿]/}"
+  n="${n//á/a}"; n="${n//é/e}"; n="${n//í/i}"; n="${n//ó/o}"; n="${n//ú/u}"; n="${n//ü/u}"
+  print -r -- "$n" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+# Órdenes de pausa: el micrófono sigue abierto pero se ignora todo hasta oír la orden de seguir
+# (útil en una llamada, para que no se cuelen frases ajenas).
+PAUSA_RE='^(pausa|en pausa|pausa la conversacion|silencio|espera un momento|un momento)( claude)?$'
+SIGUE_RE='^(sigue|continua|seguimos|ya estoy|vuelve|fin de la pausa|quita la pausa)( claude)?$'
+turno() { [[ -s "$TURNO" ]] && print -r -- "$(<"$TURNO")"; }
+resp_terminal() { [[ -f "$TERM_RESP" ]] && cat "$TERM_RESP"; }
+
+# ¿Hay una terminal compartida viva (ventana abierta y claude corriendo dentro)?
+terminal_activa() {
+  [[ -s "$TERMINAL" ]] || return 1
+  pgrep -xq Terminal || { rm -f "$TERMINAL"; return 1; }
+  local w t procs
+  read -r w t < "$TERMINAL"
+  procs="$(osascript -e "tell application \"Terminal\" to get processes of tab $t of window id $w" 2>/dev/null)" \
+    || { rm -f "$TERMINAL"; return 1; }
+  [[ "$procs" == *claude* ]] || { rm -f "$TERMINAL"; return 1; }
+  return 0
+}
+
+# Pulsa Intro en la terminal compartida (System Events solo teclea en la app que está delante;
+# se devuelve el foco a la app anterior).
+terminal_intro() {
+  local prev
+  prev="$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)"
+  osascript -e 'tell application "Terminal" to activate' -e 'delay 0.3' \
+            -e 'tell application "System Events" to keystroke return' 2>>"$LOG_FILE"
+  [[ -n "$prev" && "$prev" != Terminal ]] && osascript -e "tell application \"$prev\" to activate" 2>/dev/null
+  return 0
+}
+
+# Escribe el texto en la terminal compartida y lo envía.
+terminal_envia() {
+  local w t txt
+  read -r w t < "$TERMINAL"
+  txt="${1//\\/\\\\}"; txt="${txt//\"/\\\"}"
+  osascript -e "tell application \"Terminal\" to do script \"$txt\" in tab $t of window id $w" >/dev/null 2>>"$LOG_FILE" || return 1
+  terminal_intro
+}
+
+# Espera a que termine el turno en la terminal (el hook escribe inicio -> hablando -> fin). Devuelve los segundos.
+esperar_turno() {
+  local t=0 sin_say=0
+  while true; do
+    sleep 1; (( t++ ))
+    case "$(turno)" in
+      fin) break ;;
+      hablando)
+        estado hablando
+        # Si el hook murió antes de escribir "fin" (p. ej. por tiempo), damos el turno por acabado cuando calla.
+        if pgrep -xq say; then sin_say=0; elif (( ++sin_say >= 3 )); then break; fi ;;
+      *)
+        estado procesando
+        if (( t == AVISO_ESPERA )); then habla "Estoy en ello."
+        elif (( t > AVISO_ESPERA && t % 12 == 0 )); then tono "$TONO_ESPERA"; fi ;;
+    esac
+    if (( t % 5 == 0 )) && ! terminal_activa; then registro "la terminal se cerró a mitad de turno"; break; fi
+  done
+  # La sesión sigue viva aunque el turno no pasara por siri-claude.
+  touch "$SESSION_FILE"
+  print -r -- $t
+}
+
+# Solo una conversación a la vez: si ya hay una, lanzarlo de nuevo la cierra.
+if [[ -s "$LOCK" ]] && kill -0 "$(<"$LOCK")" 2>/dev/null; then
+  pkill -P "$(<"$LOCK")" 2>/dev/null
+  kill "$(<"$LOCK")" 2>/dev/null
+  pkill -x say 2>/dev/null
+  rm -f "$LOCK"
+  habla "Conversación cerrada."
+  exit 0
+fi
+
+# Lanzado sin terminal (Atajos/Siri): desacoplarse en una sesión propia para que el atajo
+# termine al instante y Siri deje de esperar; la conversación sigue en segundo plano.
+if [[ -z "$CONVERSA_SUELTA" && ! -t 1 ]]; then
+  CONVERSA_SUELTA=1 /usr/bin/python3 -I -c 'import subprocess, sys
+subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$0" "$@"
+  exit 0
+fi
+
+print -r -- $$ > "$LOCK"
+cerrar() { pkill -P $$ 2>/dev/null; rm -f "$LOCK" "$ESTADO"; }
+trap 'cerrar; exit 0' INT TERM
+trap 'cerrar' EXIT
+
+estado escuchando
+[[ -x "$SEMAFORO" ]] && "$SEMAFORO" --padre $$ 2>>"$LOG_FILE" &
+registro "=== inicio conversación (pid $$)"
+habla "Te escucho."
+silencio_desde=$(date +%s)
+
+while true; do
+  estado escuchando
+  tono "$TONO_ESCUCHA"
+  print -r -- "--- $(date "+%H:%M:%S") escuchando" >> "$DICTAR_LOG"
+  escrito=0
+  if terminal_activa; then
+    # Escucho en segundo plano para enterarme si el usuario escribe en la terminal mientras tanto.
+    salida_dictar="$(mktemp)"
+    "$DICTAR" --debug --pausa 2.0 --max 45 >"$salida_dictar" 2>>"$DICTAR_LOG" &
+    dpid=$!
+    while kill -0 $dpid 2>/dev/null; do
+      sleep 0.3
+      if [[ "$(turno)" == inicio ]]; then kill $dpid 2>/dev/null; escrito=1; break; fi
+    done
+    wait $dpid 2>/dev/null; rc=$?
+    (( escrito )) && rc=0
+    texto="$(<"$salida_dictar")"; rm -f "$salida_dictar"
+  else
+    texto="$("$DICTAR" --debug --pausa 2.0 --max 45 2>>"$DICTAR_LOG")"; rc=$?
+  fi
+  if (( rc != 0 )); then
+    habla "No puedo usar el micrófono. Revisa los permisos y vuelve a lanzarme."
+    exit 1
+  fi
+
+  if (( escrito )); then
+    registro "ESCRITO en la terminal"
+    silencio_desde=$(date +%s)
+    estado procesando
+    t=$(esperar_turno)
+    registro "RESPUESTA terminal (${t}s): $(resp_terminal)"
+    continue
+  fi
+
+  if [[ -z "${texto//[[:space:]]/}" ]]; then
+    registro "(nada oído en 45 s)"
+    ultima=$silencio_desde
+    [[ -f "$ACTIVIDAD" ]] && (( $(stat -f %m "$ACTIVIDAD") > ultima )) && ultima=$(stat -f %m "$ACTIVIDAD")
+    if (( $(date +%s) - ultima >= SILENCIO_MAX )); then
+      registro "fin por silencio"
+      "$PUENTE" --resumen
+      habla "Llevas un rato sin hablar. Me retiro; hasta luego."
+      exit 0
+    fi
+    continue
+  fi
+  silencio_desde=$(date +%s)
+  estado procesando
+  tono "$TONO_OIDO"
+  print -r -- "> $texto"
+  registro "OÍDO: $texto"
+  (( ECO )) && habla "He entendido: $texto"
+
+  if [[ "$(normaliza "$texto")" =~ $PAUSA_RE ]]; then
+    registro "PAUSA"
+    habla "En pausa. Di sigue cuando quieras."
+    while true; do
+      estado pausa
+      t2="$("$DICTAR" --pausa 2.0 --max 45 2>>"$DICTAR_LOG")"
+      [[ -z "${t2//[[:space:]]/}" ]] && continue
+      if [[ "$(normaliza "$t2")" =~ $SIGUE_RE ]]; then registro "FIN PAUSA"; break; fi
+      registro "(en pausa, ignorado: $t2)"
+    done
+    silencio_desde=$(date +%s)
+    habla "Te escucho."
+    continue
+  fi
+
+  if terminal_activa; then
+    # Misma conversación, pero a través de la terminal compartida.
+    if [[ "$(print -r -- "$texto" | "$PUENTE" --solo-fin)" == "__FIN__" ]]; then
+      registro "fin (despedida)"
+      "$PUENTE" --resumen
+      habla "Hasta luego."
+      exit 0
+    fi
+    rm -f "$TURNO" "$TERM_RESP"
+    if ! terminal_envia "$texto"; then
+      registro "no se pudo escribir en la terminal"
+      habla "No he podido pasarlo a la terminal."
+      continue
+    fi
+    # Comprobar que la terminal lo ha aceptado (el hook escribe "inicio"); si no, otro Intro.
+    i=0
+    while [[ "$(turno)" != inicio ]] && (( i < 15 )); do
+      sleep 0.3; (( i++ ))
+      (( i == 8 )) && terminal_intro
+    done
+    if [[ "$(turno)" != inicio ]]; then
+      registro "la terminal no aceptó el texto"
+      habla "La terminal no ha aceptado el texto."
+      continue
+    fi
+    registro "ENVIADO a la terminal"
+    t=$(esperar_turno)
+    registro "RESPUESTA terminal (${t}s): $(resp_terminal)"
+    continue
+  fi
+
+  # Pido la respuesta en segundo plano para poder avisar si tarda.
+  salida="$(mktemp)"
+  ( print -r -- "$texto" | "$PUENTE" > "$salida" ) &
+  pid=$!
+  t=0
+  while kill -0 $pid 2>/dev/null; do
+    sleep 1; (( t++ ))
+    if (( t == AVISO_ESPERA )); then
+      habla "Estoy en ello."
+    elif (( t > AVISO_ESPERA && t % 12 == 0 )); then
+      tono "$TONO_ESPERA"
+    fi
+  done
+  respuesta="$(<"$salida")"; rm -f "$salida"
+
+  registro "RESPUESTA (${t}s): $respuesta"
+  if [[ "$respuesta" == "__FIN__" ]]; then
+    habla "Hasta luego."
+    exit 0
+  fi
+  print -r -- "$respuesta"; echo
+  estado hablando
+  habla "$respuesta"
+done

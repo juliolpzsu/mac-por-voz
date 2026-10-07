@@ -1,0 +1,12 @@
+#!/bin/zsh
+# Escribe el texto recibido (argumentos o stdin) en la app que esté delante,
+# pegándolo donde esté el cursor. Conserva el portapapeles anterior.
+# Necesita permiso de Accesibilidad para el proceso que lo lanza (System Events).
+texto="${*:-$(cat)}"
+[[ -z "$texto" ]] && { echo "Falta el texto." >&2; exit 1; }
+anterior="$(pbpaste 2>/dev/null)"
+print -rn -- "$texto" | pbcopy
+osascript -e 'tell application "System Events" to keystroke "v" using command down' || exit 1
+sleep 0.5
+print -rn -- "$anterior" | pbcopy
+echo "Texto escrito en la app activa."

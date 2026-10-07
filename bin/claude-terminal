@@ -1,0 +1,66 @@
+#!/bin/zsh
+# Abre en Terminal la conversación de voz en curso como terminal COMPARTIDA: misma sesión (sin fork),
+# lo dictado se escribe ahí, lo tecleado se contesta también por voz, y todo queda en una sola conversación.
+# Espera a que acabe el turno de voz en marcha (para no pisar la transcripción) y entonces abre la terminal.
+STATE_DIR="$HOME/.local/state/siri-claude"
+SESSION_FILE="$STATE_DIR/session"
+TERMINAL="$STATE_DIR/terminal"
+LOG_FILE="$STATE_DIR/error.log"
+#   claude-terminal            -> abre la conversación de voz en curso
+#   claude-terminal <id>       -> abre esa otra conversación (ver claude-sesiones) y la voz continúa en ella
+id="${1:-$([[ -s "$SESSION_FILE" ]] && <"$SESSION_FILE")}"
+if [[ -z "$id" ]]; then
+  echo "No hay conversación de voz en curso." >&2
+  exit 1
+fi
+if [[ -n "$1" && "$1" != "$(<"$SESSION_FILE" 2>/dev/null)" && -z "$TERMINAL_SUELTA" ]]; then
+  [[ -s "$HOME/.claude/projects/$(print -r -- "$HOME" | tr '/' '-')/$1.jsonl" ]] || { echo "No existe la sesión $1." >&2; exit 1; }
+  mkdir -p "$STATE_DIR"
+  print -r -- "$1" > "$SESSION_FILE"
+  print -r -- "$(date "+%H:%M:%S") la conversación de voz pasa a la sesión $1" >> "$STATE_DIR/conversa.log"
+fi
+
+# Si ya hay una terminal compartida viva, solo traerla delante.
+if [[ -s "$TERMINAL" ]]; then
+  read -r w t < "$TERMINAL"
+  if osascript -e "tell application \"Terminal\" to get processes of tab $t of window id $w" 2>/dev/null | grep -q claude; then
+    osascript -e 'tell application "Terminal" to activate' -e "tell application \"Terminal\" to set index of window id $w to 1" >/dev/null 2>&1
+    echo "La terminal compartida ya estaba abierta."
+    exit 0
+  fi
+  rm -f "$TERMINAL"
+fi
+
+# Desacoplarse: el turno de voz que ha pedido la terminal tiene que terminar antes de abrirla.
+if [[ -z "$TERMINAL_SUELTA" ]]; then
+  TERMINAL_SUELTA=1 /usr/bin/python3 -I -c 'import subprocess, sys
+subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$0" "$id"
+  echo "Abriendo la terminal compartida en cuanto termine este turno."
+  exit 0
+fi
+
+# Esperar a que no quede ningún claude -p sobre esta sesión (máx. 3 min).
+for i in {1..180}; do
+  pgrep -f -- "claude -p --resume $id" >/dev/null || pgrep -f -- "claude -p --session-id $id" >/dev/null || break
+  sleep 1
+done
+sleep 1
+
+REGLAS="Esta conversación es compartida entre voz y terminal: lo que el usuario dicta aparece aquí escrito y tus respuestas se leen siempre en voz alta. Responde en castellano, breve y en texto plano salvo que pida detalle. Si vas a hacer algo que tarda, dilo en una frase y hazlo."
+# Sin las variables heredadas de la sesión de voz: con CLAUDE_CODE_CHILD_SESSION la terminal no guardaría la transcripción.
+cmd="cd ~ && env -u CLAUDE_SIN_AVISO -u CONVERSA_SUELTA -u TERMINAL_SUELTA -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 CLAUDE_VOZ=1 ~/.local/bin/claude --resume $id --permission-mode bypassPermissions --append-system-prompt '$REGLAS'"
+res="$(osascript -e 'tell application "Terminal"' -e 'activate' -e "do script \"$cmd\"" -e 'end tell' 2>>"$LOG_FILE")"
+# res = "tab 1 of window id 1301"
+t="${res#tab }"; t="${t%% *}"; w="${res##*window id }"
+if [[ -z "$w" || -z "$t" ]]; then
+  print -r -- "$(date "+%H:%M:%S") claude-terminal: no pude abrir la terminal ($res)" >> "$LOG_FILE"
+  exit 1
+fi
+# Esperar a que claude esté corriendo dentro antes de anunciar la terminal al bucle de voz.
+for i in {1..20}; do
+  osascript -e "tell application \"Terminal\" to get processes of tab $t of window id $w" 2>/dev/null | grep -q claude && break
+  sleep 0.5
+done
+sleep 2
+print -r -- "$w $t" > "$TERMINAL"
+print -r -- "$(date "+%H:%M:%S") terminal compartida abierta (ventana $w, pestaña $t)" >> "$STATE_DIR/conversa.log"

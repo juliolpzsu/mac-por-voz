@@ -1,0 +1,59 @@
+#!/bin/zsh
+# Resumen hablado del día: Recordatorios + Google Calendar + Gmail.
+# Escribe texto plano pensado para leerse en voz alta.
+
+CLAUDE="$HOME/.local/bin/claude"
+LOG_FILE="$HOME/.local/state/siri-claude/error.log"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export CLAUDE_SIN_AVISO=1
+mkdir -p "${LOG_FILE:h}"
+
+# Recordatorios pendientes de la app Recordatorios (por lista, en bloque: una consulta por propiedad).
+recordatorios="$(osascript 2>>"$LOG_FILE" <<'EOF'
+tell application "Reminders"
+  set salida to ""
+  set total to 0
+  repeat with l in lists
+    set nombreLista to name of l
+    tell l
+      set nombres to name of (every reminder whose completed is false)
+      set fechas to due date of (every reminder whose completed is false)
+    end tell
+    repeat with i from 1 to count of nombres
+      if total < 40 then
+        set d to item i of fechas
+        if d is missing value then
+          set f to "sin fecha"
+        else
+          set f to (short date string of d) & " " & (time string of d)
+        end if
+        set salida to salida & "- " & (item i of nombres) & " [" & nombreLista & ", " & f & "]" & linefeed
+        set total to total + 1
+      end if
+    end repeat
+  end repeat
+  return salida
+end tell
+EOF
+)"
+[[ -z "$recordatorios" ]] && recordatorios="(ninguno)"
+
+fecha="$(LC_TIME=es_ES.UTF-8 date '+%A %-d de %B de %Y, %H:%M')"
+
+RULES="Tu respuesta se leerá en voz alta por Siri. Responde en castellano, en texto plano, sin markdown, \
+listas, emojis ni URLs. Sé concreto y breve: entre cuatro y ocho frases. Ordena por hora. \
+Si no hay nada en alguna fuente, dilo en media frase y sigue. No inventes datos."
+
+prompt="Hoy es $fecha. Prepárame el resumen del día.
+
+Recordatorios pendientes (app Recordatorios):
+$recordatorios
+
+Pasos:
+1. Consulta mi Google Calendar: eventos de hoy en todos mis calendarios (list_calendars y luego list_events).
+2. Busca en Gmail los correos de hoy (newer_than:1d) que sean de personas, del trabajo o los estudios; ignora promociones, newsletters y notificaciones automáticas.
+3. Cuéntame el día: primero lo que tengo a una hora concreta, después los recordatorios vencidos o de hoy, luego los correos que merecen respuesta. Termina con una frase sobre qué conviene hacer primero."
+
+print -r -- "$prompt" | "$CLAUDE" -p --model sonnet --no-session-persistence \
+  --allowedTools "mcp__claude_ai_Google_Calendar__list_calendars,mcp__claude_ai_Google_Calendar__list_events,mcp__claude_ai_Gmail__search_threads,mcp__claude_ai_Gmail__get_thread,mcp__claude_ai_Gmail__get_message" \
+  --append-system-prompt "$RULES" 2>>"$LOG_FILE"

@@ -1,0 +1,122 @@
+#!/bin/zsh
+# Puente de voz -> Claude Code.
+# Lee por stdin el texto dictado y escribe la respuesta en texto plano.
+# Con SIRI_HABLA=1 además la dice en voz alta con la voz $VOZ (para el atajo
+# "Conversar con Claude", que no tiene acción de hablar propia).
+
+CLAUDE="$HOME/.local/bin/claude"
+STATE_DIR="$HOME/.local/state/siri-claude"
+SESSION_FILE="$STATE_DIR/session"
+LOG_FILE="$STATE_DIR/error.log"
+# Resúmenes de conversaciones anteriores (uno por despedida); el más reciente se le da a la sesión nueva.
+RESUMENES="$STATE_DIR/resumenes"
+# Segundos sin hablar tras los cuales se empieza una conversación nueva.
+TTL=1800
+# Voz con la que habla Claude, distinta de la de Siri. Ver: say -v '?'
+VOZ="Mónica"
+
+habla() { [[ -n "$SIRI_HABLA" ]] && say -v "$VOZ" -- "$1" 2>>"$LOG_FILE"; return 0; }
+
+export CLAUDE_SIN_AVISO=1
+export LC_ALL=es_ES.UTF-8
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+VOICE_RULES="Estás en una conversación continua por voz: el usuario habla, tú respondes en voz alta y \
+el micrófono vuelve a abrirse solo, hasta que él se despida. Responde en castellano, en una a tres frases \
+salvo que pida más detalle; si vas a hacer algo que tarda, dilo en una frase y hazlo. \
+Usa solo texto plano: sin markdown, listas, tablas, bloques de código, emojis ni URLs. \
+El dictado puede traer errores de transcripción; interpreta la intención más probable y, si no está claro, pregunta. \
+Antes de borrar, sobrescribir o hacer algo difícil de deshacer, di qué vas a hacer y pide confirmación; \
+el usuario confirmará en su siguiente frase. \
+Tienes permisos totales y puedes actuar sobre el Mac (open, osascript, AppleScript, shortcuts run). \
+Scripts propios en ~/.local/bin: claude-terminal abre esta conversación en Terminal; \
+claude-tarea \"texto\" lanza una tarea larga en segundo plano que avisa por voz al terminar (úsalo cuando pida algo largo o \"en segundo plano\"); \
+claude-escribe \"texto\" pega el texto donde esté el cursor de la app activa (úsalo cuando pida escribir, redactar o dictar algo en una app: tú rediges el texto limpio y lo pegas); \
+claude-hoy da el resumen del día; \
+recordatorio \"texto\" [\"AAAA-MM-DD HH:MM\"] crea un recordatorio en la app Recordatorios (úsalo para apuntar tareas o avisos); \
+claude-sesiones lista las conversaciones recientes de Claude Code (fecha, id y primera frase) y claude-terminal <id> abre esa conversación en la terminal compartida y la voz continúa en ella (úsalo cuando pida retomar un trabajo anterior). \
+Para correo y calendario usa las herramientas de Gmail y Google Calendar. \
+El usuario puede decir pausa para que se ignore todo hasta que diga sigue."
+
+resumen_sesion() {
+  # Resume la conversación en curso en un archivo, en segundo plano y sobre una copia (--fork-session)
+  # para no añadir turnos a la sesión original. Lo usan la despedida y el cierre por silencio.
+  [[ -s "$SESSION_FILE" ]] || return 0
+  local id="$(<"$SESSION_FILE")"
+  local transcripcion="$HOME/.claude/projects/$(print -r -- "$HOME" | tr "/" "-")/$id.jsonl"
+  [[ -s "$transcripcion" ]] || return 0
+  (( $(grep -c '"type":"user"' "$transcripcion") >= 2 )) || return 0
+  mkdir -p "$RESUMENES"
+  local destino="$RESUMENES/$(date "+%Y-%m-%d_%H%M").md"
+  local peticion="Escribe un resumen de esta conversación para retomarla otro día: qué se hizo, qué quedó pendiente y qué decisiones o preferencias expresó el usuario. Máximo 12 líneas, texto plano, en castellano, sin saludos ni explicaciones."
+  /usr/bin/python3 -I -c 'import subprocess, sys
+subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' \
+    /bin/zsh -c 'CLAUDE_SIN_AVISO=1 "$1" -p --resume "$2" --fork-session --permission-mode bypassPermissions "$3" > "$4.tmp" 2>/dev/null && mv "$4.tmp" "$4" || rm -f "$4.tmp"' \
+    _ "$CLAUDE" "$id" "$peticion" "$destino"
+}
+if [[ "$1" == "--resumen" ]]; then resumen_sesion; exit 0; fi
+
+prompt="$(cat)"
+# --solo-fin: solo dice si el texto es una despedida (imprime __FIN__); lo usa claude-conversa en modo terminal.
+solo_fin=0; [[ "$1" == "--solo-fin" ]] && solo_fin=1
+if [[ -z "${prompt//[[:space:]]/}" ]]; then
+  (( solo_fin )) && exit 0
+  habla "No te he oído. ¿Sigues ahí?"
+  echo "No te he oído. ¿Sigues ahí?"
+  exit 0
+fi
+
+mkdir -p "$STATE_DIR"
+cd "$HOME"
+
+# Frases de cierre: el atajo termina el bucle cuando recibe "__FIN__".
+norm="${(L)prompt}"
+norm="${norm//[.,;:!?¡¿]/}"
+norm="${norm//á/a}"; norm="${norm//é/e}"; norm="${norm//í/i}"; norm="${norm//ó/o}"; norm="${norm//ú/u}"; norm="${norm//ü/u}"
+norm="$(print -r -- "$norm" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+fin_corto='^(adios( claude)?|hasta luego( claude)?|eso es todo( claude)?|nada mas( claude)?|(ya )?(puedes )?(cierra|cerrar|termina|terminar|acaba|acabar)( la)?( conversacion| el chat| la charla)?)( gracias)?$'
+fin_largo='(cierra|cerrar|termina|terminar|acaba|acabar) (la )?(conversacion|charla|sesion)'
+if [[ "$norm" =~ $fin_corto || "$norm" =~ $fin_largo ]]; then
+  (( solo_fin )) && { echo "__FIN__"; exit 0; }
+  resumen_sesion
+  rm -f "$SESSION_FILE"
+  habla "Hasta luego."
+  echo "__FIN__"
+  exit 0
+fi
+(( solo_fin )) && exit 0
+
+ask() {
+  # Sin confirmaciones: por voz no hay nadie que pueda aprobar cada acción.
+  print -r -- "$prompt" | "$CLAUDE" -p "$@" --permission-mode bypassPermissions \
+    --append-system-prompt "$VOICE_RULES" 2>>"$LOG_FILE"
+}
+
+new_session() {
+  local id="$(uuidgen | tr 'A-Z' 'a-z')"
+  # Contexto de la última conversación (si es de hace menos de una semana).
+  local ultimo="$(ls -t "$RESUMENES"/*.md 2>/dev/null | head -1)"
+  if [[ -n "$ultimo" ]] && (( $(date +%s) - $(stat -f %m "$ultimo") < 7*86400 )); then
+    VOICE_RULES="$VOICE_RULES
+Resumen de la conversación anterior ($(basename "$ultimo" .md | tr '_' ' ')): $(<"$ultimo")"
+  fi
+  print -r -- "$id" > "$SESSION_FILE"
+  ask --session-id "$id"
+}
+
+# Continúa la conversación si la última vez fue hace poco; si no, empieza otra.
+if [[ -s "$SESSION_FILE" ]] && (( $(date +%s) - $(stat -f %m "$SESSION_FILE") < TTL )); then
+  reply="$(ask --resume "$(<"$SESSION_FILE")")" || reply="$(new_session)"
+else
+  reply="$(new_session)"
+fi
+
+if [[ -z "$reply" ]]; then
+  habla "Ha habido un error al hablar con Claude."
+  echo "Ha habido un error al hablar con Claude."
+  exit 1
+fi
+
+touch "$SESSION_FILE"
+habla "$reply"
+print -r -- "$reply"

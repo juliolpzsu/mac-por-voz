@@ -1,0 +1,46 @@
+#!/bin/zsh
+# Pregunta sobre la pantalla, en dos pasos que llama el atajo:
+#   claude-pantalla guarda [ruta]   -> guarda la captura (ruta por argumento, bytes por stdin o captura propia)
+#   claude-pantalla pregunta        -> lee la pregunta por stdin y responde mirando la captura
+
+CLAUDE="$HOME/.local/bin/claude"
+STATE_DIR="$HOME/.local/state/siri-claude"
+IMG="$STATE_DIR/pantalla.png"
+LOG_FILE="$STATE_DIR/error.log"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export CLAUDE_SIN_AVISO=1
+mkdir -p "$STATE_DIR"
+
+case "$1" in
+  guarda)
+    shift
+    rm -f "$IMG"
+    if [[ -n "$1" && -f "$1" ]]; then
+      cp "$1" "$IMG"
+    elif [[ ! -t 0 ]]; then
+      cat > "$IMG"
+    fi
+    # Sin captura del atajo: la hace el script (necesita permiso de grabación de pantalla).
+    [[ -s "$IMG" ]] || screencapture -x "$IMG" 2>>"$LOG_FILE"
+    ;;
+  pregunta)
+    pregunta="$(cat)"
+    [[ -z "${pregunta//[[:space:]]/}" ]] && pregunta="Explícame lo que ves en la pantalla."
+    if [[ ! -s "$IMG" ]]; then
+      echo "No tengo captura de pantalla. Revisa el permiso de grabación de pantalla de Atajos."
+      exit 1
+    fi
+    RULES="Eres el tutor del usuario (PERSONALIZA: describe aquí quién es). Te pasan una captura de su pantalla y una pregunta. \
+Responde en castellano, texto plano sin markdown, directo al grano, máximo unas 150 palabras. \
+Si ves un error, di la causa probable y cómo arreglarlo. Si es código, coméntalo. Si es un diseño, \
+describe cómo replicarlo. Si la pregunta no se puede responder con la captura, di qué falta."
+    cd "$STATE_DIR"
+    print -r -- "Mira la captura de pantalla en $IMG y responde a esto: $pregunta" | "$CLAUDE" -p --strict-mcp-config \
+      --tools Read --allowedTools Read --model sonnet --no-session-persistence \
+      --append-system-prompt "$RULES" 2>>"$LOG_FILE"
+    ;;
+  *)
+    echo "uso: claude-pantalla guarda [ruta] | pregunta" >&2
+    exit 2
+    ;;
+esac

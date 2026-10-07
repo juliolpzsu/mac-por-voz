@@ -1,0 +1,13 @@
+#!/bin/zsh
+# Lista las conversaciones recientes de Claude Code (de este directorio de trabajo, ~):
+#   fecha hora | id | primera frase del usuario
+# Úsalo para elegir cuál retomar con: claude-terminal <id>
+n="${1:-12}"
+dir="$HOME/.claude/projects/$(print -r -- "$HOME" | tr '/' '-')"
+ls -t "$dir"/*.jsonl 2>/dev/null | head -n 40 | while read -r f; do
+  id="$(basename "$f" .jsonl)"
+  primera="$(jq -r 'select(.type=="user") | .message.content | if type=="string" then . else (.[]? | select(.type=="text") | .text) end' "$f" 2>/dev/null \
+    | grep -vE '^\s*$|^<|^\[Request interrupted|^Caveat:|^/' | head -1 | tr '\n' ' ' | cut -c1-90)"
+  [[ -z "$primera" ]] && continue
+  print -r -- "$(date -r "$(stat -f %m "$f")" "+%Y-%m-%d %H:%M") | $id | $primera"
+done | head -n "$n"

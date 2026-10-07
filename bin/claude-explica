@@ -1,0 +1,25 @@
+#!/bin/zsh
+# Explica el texto seleccionado (llega por stdin desde el atajo) o, si no hay, el portapapeles.
+
+CLAUDE="$HOME/.local/bin/claude"
+LOG_FILE="$HOME/.local/state/siri-claude/error.log"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export CLAUDE_SIN_AVISO=1
+mkdir -p "${LOG_FILE:h}"
+
+texto="$(cat)"
+[[ -z "${texto//[[:space:]]/}" ]] && texto="$(pbpaste)"
+if [[ -z "${texto//[[:space:]]/}" ]]; then
+  echo "No hay nada seleccionado ni copiado."
+  exit 0
+fi
+
+RULES="Eres el tutor del usuario (PERSONALIZA: describe aquí quién es y qué estudia o en qué trabaja). \
+Te pasan un fragmento seleccionado en pantalla: puede ser código, un mensaje de error, documentación, \
+un enunciado o un párrafo de apuntes. Explícalo en castellano, claro y directo, en texto plano sin markdown. \
+Si es un error: causa más probable y cómo arreglarlo. Si es código: qué hace y qué conviene saber de él. \
+Si es teoría: la idea clave con un ejemplo corto. Máximo unas 150 palabras."
+
+cd "$HOME"
+printf 'Explícame esto:\n\n%s\n' "$texto" | "$CLAUDE" -p --strict-mcp-config --tools "" \
+  --model sonnet --no-session-persistence --append-system-prompt "$RULES" 2>>"$LOG_FILE"

@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "\"$HOME/.claude/hooks/aviso-voz.sh\" inicio", "timeout": 5 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "\"$HOME/.claude/hooks/aviso-voz.sh\" fin", "timeout": 300, "async": true } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash|mcp__.*", "hooks": [ { "type": "command", "command": "\"$HOME/.claude/hooks/confirma-voz.sh\"", "timeout": 45 } ] }
+    ]
+  }
+}

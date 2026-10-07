@@ -1,0 +1,40 @@
+#!/bin/zsh
+# Tarea larga en segundo plano: la lanza, cuelga, y avisa por voz al terminar.
+# Uso: claude-tarea "lo que hay que hacer"   (o por stdin)
+# Resultado completo en ~/.local/state/siri-claude/tareas/<fecha>.md
+STATE_DIR="$HOME/.local/state/siri-claude"
+TAREAS="$STATE_DIR/tareas"
+LOG_FILE="$STATE_DIR/error.log"
+VOZ="Mónica"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export CLAUDE_SIN_AVISO=1 LC_ALL=es_ES.UTF-8
+mkdir -p "$TAREAS"
+
+tarea="${*:-$(cat)}"
+[[ -z "${tarea//[[:space:]]/}" ]] && { echo "Falta la tarea." >&2; exit 1; }
+
+if [[ -z "$TAREA_SUELTA" ]]; then
+  TAREA_SUELTA=1 /usr/bin/python3 -I -c 'import subprocess, sys
+subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$0" "$tarea"
+  echo "Tarea lanzada en segundo plano; avisaré por voz al terminar."
+  exit 0
+fi
+
+cd "$HOME"
+salida="$TAREAS/$(date +%Y%m%d-%H%M%S).md"
+inicio=$(date +%s)
+resultado="$(print -r -- "$tarea" | claude -p --permission-mode bypassPermissions \
+  --append-system-prompt "Trabajas en segundo plano sin nadie mirando; no hagas preguntas. \
+Termina tu respuesta con una línea que empiece por RESUMEN: y una o dos frases en castellano, \
+sin markdown, con lo que has hecho; esa línea se leerá en voz alta." 2>>"$LOG_FILE")"
+estado=$?
+{ print -r -- "# Tarea"; print -r -- "$tarea"; print; print -r -- "# Resultado"; print -r -- "$resultado"; } > "$salida"
+
+resumen="$(print -r -- "$resultado" | grep -m1 '^RESUMEN:' | sed 's/^RESUMEN:[[:space:]]*//')"
+[[ -z "$resumen" ]] && resumen="$(print -r -- "$resultado" | tr '\n' ' ' | cut -c1-300)"
+min=$(( ($(date +%s) - inicio) / 60 ))
+if (( estado != 0 )); then
+  say -v "$VOZ" -- "La tarea en segundo plano ha fallado. Mira el registro de errores."
+else
+  say -v "$VOZ" -- "He terminado la tarea en segundo plano. $resumen"
+fi
